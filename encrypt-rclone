@@ -1,0 +1,190 @@
+#!/bin/bash
+
+RCLONE_CONFIG_DIRPATH=${RCLONE_CONFIG_DIRPATH:-~/.config/rclone}
+
+function _backup_depcheck() {
+    local dependency=${1}
+    if ! which ${dependency} &>/dev/null; then return 3; fi
+}
+
+function _backup_get_value() {
+    local desc=${1}
+
+    # do not show chars as typing
+    stty -echo
+
+    local password=''
+    while [ -z "${password}" ]; do
+        # show the prompt and attempt to read a value
+        echo -n "[backup] ${desc}: " >$(tty)
+        read password
+        echo >$(tty)
+
+        # if not allowing blank, alert the user and try again
+        if [ -z "${password}" ]; then
+            echo "${desc} cannot be blank" >$(tty)
+        else
+            break
+        fi
+    done
+
+    # re-enable echoing and "return" the password (captured by caller)
+    stty echo
+    echo "${password}"
+}
+
+function _archive() {
+    local archive_filepath=${1}
+    local backup_dirs=${2}
+
+    local dirs_to_tar=$(echo ${backup_dirs} | tr ':' ' ')
+
+	tar -czf ${archive_filepath} ${dirs_to_tar}
+    if [ $? != 0 ]; then
+        echo "Error: could not create archive."
+        exit 1
+    fi
+
+	echo "Created archive: ${archive_filepath}"
+}
+
+function _encrypt() {
+    local unencrypted_filepath=${1}
+    local encrypted_filepath=${2}
+
+	local password=${ENCRYPT_RCLONE_PASSWORD}
+    if [ -z "${ENCRYPT_RCLONE_PASSWORD}" ]; then
+        password=$(_backup_get_value "password")
+    fi
+
+	echo "${password}" | gpg -q --symmetric --passphrase-fd 0 -o ${encrypted_filepath} ${unencrypted_filepath}
+    if [ $? != 0 ]; then
+        echo "Error: could not encrypt archive."
+        exit 1
+    fi
+
+	echo "Created encrypted archive: ${encrypted_filepath}"
+}
+
+function _transfer() {
+    local encrypted_filepath=${1}
+    local remote=${2}
+    local docker_backup_filepath="/workspace/backup-$(date +%Y%m%d-%H%M%S).gpg"
+
+    if [ ! -d "${RCLONE_CONFIG_DIRPATH}" ]; then
+        echo "Error: could not find rclone config directory at: ${RCLONE_CONFIG_DIRPATH}"
+        exit 1
+    fi
+
+    docker run \
+        --rm \
+        -it \
+        -v ${RCLONE_CONFIG_DIRPATH}:/config/rclone \
+        -v ${encrypted_filepath}:${docker_backup_filepath} \
+        rclone/rclone:latest \
+        copy ${docker_backup_filepath} ${remote}
+
+    if [ $? != 0 ]; then
+        echo "Error: failed to transfer archive to target host"
+        exit 1
+    fi
+
+    echo "Completed transfer"
+}
+
+function _cleanup() {
+    local archive_filepath=${1}
+    local encrypted_filepath=${2}
+
+    if [ -f $archive_filepath ]; then
+        rm $archive_filepath
+    fi
+    if [ -f $encrypted_filepath ]; then
+        rm $encrypted_filepath
+    fi
+
+    echo "Cleaned up."
+}
+
+function _decrypt() {
+    local encrypted_filepath=${1}
+    local archive_filepath=${2}
+
+	local password=$(_backup_get_value "password")
+
+	echo "${password}" | gpg -d -q --passphrase-fd 0 -o ${archive_filepath} ${encrypted_filepath}
+
+    if [ $? != 0 ]; then
+        echo "Error: could not decrypt archive."
+        exit 1
+    fi
+}
+
+function backup_help() {
+    echo "description: Encrypts and stores backups using gpg, tar and scp"
+    echo ""
+    echo "usage: backup [FUNCTION] [ARGUMENTS] "
+    echo -e "\tFUNCTIONS"
+    echo -e "\t\tput"
+    echo -e "\t\t\targ1: remote - the scp address of the backup store, e.g. remote:backup-dir"
+    echo -e "\t\t\targ2: dirs - directories to backup (colon-separated)"
+    echo -e "\t\textract"
+    echo -e "\t\t\targ1: filepath - the filepath of the encrypted archive to extract"
+    echo ""
+}
+
+function backup_put() {
+    local remote=${1}
+    local backup_dirs=${2}
+
+    if [ -z ${remote} ]; then
+        echo "Error: no remote host and path details specified"
+        exit 1
+    fi
+
+    local now=$(date "+%Y%m%d%H%M%S")
+    local archive_filepath=/tmp/backup_${now}.tar.gz
+    local encrypted_filepath=/tmp/backup_${now}.gpg
+
+    _archive ${archive_filepath} ${backup_dirs}
+	_encrypt ${archive_filepath} ${encrypted_filepath}
+    _transfer ${encrypted_filepath} ${remote}
+    _cleanup ${archive_filepath} ${encrypted_filepath}
+}
+
+function backup_extract() {
+    local encrypted_filepath=$1
+
+    if [ -z ${encrypted_filepath} ]; then
+        echo "Error: no encrypted file specified"
+        exit 1
+    fi
+
+    local archive_dir=$(dirname ${encrypted_filepath})
+    local archive_filename=$(basename ${encrypted_filepath})
+    local archive_filename_noext="${archive_filename%.*}"
+
+    local now=$(date "+%Y%m%d%H%M%S")
+    local archive_filepath=${archive_dir}/decrypted_${archive_filename_noext}.tar.gz
+
+    _decrypt ${encrypted_filepath} ${archive_filepath}
+
+    echo "Decrypted file available: ${archive_filepath}"
+}
+
+
+[ $# = 0 ] && backup_help && exit
+OPERATION=${1}; shift
+if ! _backup_depcheck gpg; then
+    echo "gpg is required to run backup"
+    exit 3
+fi
+case ${OPERATION} in
+    put|extract)
+        backup_${OPERATION} $@
+        ;;
+    *)
+        backup_help $@
+        exit 1
+        ;;
+esac
