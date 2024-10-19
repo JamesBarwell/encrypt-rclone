@@ -20,7 +20,7 @@ The motivation for this script is to make it easy to store backups on a cloud or
 
 You can use rclone to help auto-generate the config, by running:
 ```sh
-docker run --rm -it -v ~/.config/rclone:/root/.config/rclone rclone/rclone:latest config
+docker run --rm -it -v ~/.config/rclone:/config/rclone rclone/rclone:latest config
 ```
 
 Note: if your config is stored in a different location, ensure that you set the following env var when running the script:
@@ -63,3 +63,9 @@ You may wish to use further scripts to ensure that the password is stored more s
 ```sh
 tar -xvzf /path/to/my/decrypted_backup-20191105-153940.tar.gz
 ```
+
+## Todo
+
+make it fail properly if the upload doesn't work
+expose other rclone options
+make it work with an existing gpg key
